@@ -43,7 +43,7 @@ def _chat_json(system_prompt: str, user_prompt: str, retry: bool = True) -> dict
             {"role": "user", "content": user_prompt},
         ],
         temperature=0.4,
-        max_tokens=4000,
+        max_completion_tokens=4000,
     )
     raw = resp.choices[0].message.content
     cleaned = _strip_code_fences(raw)
@@ -64,7 +64,7 @@ def _chat_json(system_prompt: str, user_prompt: str, retry: bool = True) -> dict
                     },
                 ],
                 temperature=0.2,
-                max_tokens=4000,
+                max_completion_tokens=4000,
             )
             raw2 = _strip_code_fences(resp2.choices[0].message.content)
             return json.loads(raw2)
