@@ -3,9 +3,12 @@ import json
 import re
 from groq import Groq
 
-GROQ_API_KEY = os.getenv("GROQ_API_KEY", "")
-TEXT_MODEL = os.getenv("GROQ_TEXT_MODEL") or "openai/gpt-oss-20b"
-WHISPER_MODEL = os.getenv("GROQ_WHISPER_MODEL") or "whisper-large-v3"
+DEFAULT_TEXT_MODEL = "llama-3.3-70b-versatile"
+DEFAULT_WHISPER_MODEL = "whisper-large-v3"
+
+GROQ_API_KEY = (os.getenv("GROQ_API_KEY") or "").strip()
+TEXT_MODEL = (os.getenv("GROQ_TEXT_MODEL") or DEFAULT_TEXT_MODEL).strip() or DEFAULT_TEXT_MODEL
+WHISPER_MODEL = (os.getenv("GROQ_WHISPER_MODEL") or DEFAULT_WHISPER_MODEL).strip() or DEFAULT_WHISPER_MODEL
 
 _client = None
 
@@ -14,61 +17,83 @@ class GroqNotConfiguredError(Exception):
     pass
 
 
-def get_client() -> Groq:
-    global _client
+def _require_api_key() -> str:
     if not GROQ_API_KEY:
         raise GroqNotConfiguredError(
             "AI features require a Groq API key. Please add GROQ_API_KEY to your backend .env file."
         )
+    return GROQ_API_KEY
+
+
+def get_client() -> Groq:
+    global _client
+    key = _require_api_key()
     if _client is None:
-        _client = Groq(api_key=GROQ_API_KEY)
+        _client = Groq(api_key=key)
     return _client
 
 
 def _strip_code_fences(text: str) -> str:
-    text = text.strip()
+    text = (text or "").strip()
     text = re.sub(r"^```(?:json)?\s*", "", text)
     text = re.sub(r"\s*```$", "", text)
     return text.strip()
 
 
-def _chat_json(system_prompt: str, user_prompt: str, retry: bool = True) -> dict:
-    """Call Groq chat completion and parse a JSON object from the response,
-    retrying once with a stricter instruction if parsing fails."""
-    client = get_client()
-    resp = client.chat.completions.create(
-        model=TEXT_MODEL,
-        messages=[
-            {"role": "system", "content": system_prompt},
-            {"role": "user", "content": user_prompt},
-        ],
-        temperature=0.4,
-        max_completion_tokens=4000,
-    )
-    raw = resp.choices[0].message.content
+def _safe_json_from_response(raw: str, *, retry: bool = True):
     cleaned = _strip_code_fences(raw)
     try:
         return json.loads(cleaned)
     except json.JSONDecodeError:
-        if retry:
-            client = get_client()
-            resp2 = client.chat.completions.create(
-                model=TEXT_MODEL,
-                messages=[
-                    {"role": "system", "content": system_prompt},
-                    {"role": "user", "content": user_prompt},
-                    {"role": "assistant", "content": raw},
-                    {
-                        "role": "user",
-                        "content": "That was not valid JSON. Respond again with ONLY a single valid JSON object/array. No prose, no markdown fences.",
-                    },
-                ],
-                temperature=0.2,
-                max_completion_tokens=4000,
-            )
-            raw2 = _strip_code_fences(resp2.choices[0].message.content)
-            return json.loads(raw2)
+        if not retry:
+            raise
+
+        client = get_client()
+        retry_resp = client.chat.completions.create(
+            model=TEXT_MODEL,
+            messages=[
+                {"role": "system", "content": "You are a strict JSON generator."},
+                {"role": "user", "content": "Return ONLY a single valid JSON object/array. No prose, no markdown fences."},
+            ],
+            temperature=0.2,
+            max_completion_tokens=4000,
+        )
+        retry_raw = retry_resp.choices[0].message.content
+        return json.loads(_strip_code_fences(retry_raw))
+
+
+def _chat_json(system_prompt: str, user_prompt: str, retry: bool = True) -> dict:
+    """Call Groq chat completion and parse a JSON object from the response,
+    retrying once with a stricter instruction if parsing fails."""
+    try:
+        client = get_client()
+        resp = client.chat.completions.create(
+            model=TEXT_MODEL,
+            messages=[
+                {"role": "system", "content": system_prompt},
+                {"role": "user", "content": user_prompt},
+            ],
+            temperature=0.4,
+            max_completion_tokens=4000,
+        )
+        raw = resp.choices[0].message.content
+        result = _safe_json_from_response(raw, retry=retry)
+        if isinstance(result, list):
+            return result
+        if isinstance(result, dict):
+            return result
+        return {}
+    except GroqNotConfiguredError:
         raise
+    except Exception as exc:
+        message = str(exc).lower()
+        if "model" in message or "not available" in message or "unsupported" in message:
+            raise RuntimeError(
+                "The configured Groq model is unavailable. Please check GROQ_TEXT_MODEL in the backend environment."
+            ) from exc
+        raise RuntimeError(
+            "The AI service is temporarily unavailable. Please try again in a moment."
+        ) from exc
 
 
 GROUNDING_RULE = (

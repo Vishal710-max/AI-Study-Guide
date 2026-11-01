@@ -15,8 +15,8 @@ def _handle(fn, *args, **kwargs):
         return fn(*args, **kwargs)
     except GroqNotConfiguredError as e:
         raise HTTPException(status_code=503, detail=str(e))
-    except Exception as e:
-        raise HTTPException(status_code=500, detail=f"Something went wrong while talking to the AI. Please try again. ({e})")
+    except Exception:
+        raise HTTPException(status_code=500, detail="Something went wrong while talking to the AI. Please try again.")
 
 
 @router.post("/generate-mcqs")
